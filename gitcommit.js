@@ -1,97 +1,133 @@
-const { Octokit } = require("@octokit/rest");
-const GITHUB_API_TOKEN = process.env.GITHUB_API_TOKEN;
-const github = new Octokit({
-  auth: GITHUB_API_TOKEN
-});
+const GitHub = require("github-api");
+function GithubAPI(auth) {
+  let repo;
+  let filesToCommit = [];
+  let currentBranch = {};
+  let newCommit = {};
+  let gh = new GitHub(auth);
 
-export const push = options => {
-  let data = {};
-  return getReferenceCommit(options, data)
-    .then(() => {
-      return github.git
-        .createBlob({
-          owner: options.owner,
-          repo: options.repo,
-          content: options.file.content,
-          encoding: "utf-8"
-        })
-        .then(blob => {
-          console.log(blob);
-          return {
-            sha: blob.data.sha,
-            path: options.file.path,
-            mode: "100644",
-            type: "blob"
-          };
-        });
-    })
-    .then(file => {
-      console.log(file);
-      return github.git.createTree(
-        {
-          owner: options.owner,
-          repo: options.repo,
-          tree: file,
-          base_tree: data.referenceCommitSha
-        },
-        (err, res) => {
-          if (err) {
-            console.log(err);
-          }
-          return res;
-        }
+  this.setRepo = function(userName, repoName) {
+    repo = gh.getRepo(userName, repoName);
+  };
+
+  this.setBranch = function(branchName) {
+    if (!repo) {
+      throw "Repository is not initialized";
+    }
+
+    return repo.listBranches().then(branches => {
+      let branchExists = branches.data.find(
+        branch => branch.name === branchName
       );
-    })
-    .then(res => console.log(res));
-};
 
-const getReferenceCommit = (options, data) =>
-  github.git
-    .getRef(
-      {
-        owner: options.owner,
-        repo: options.repo,
-        ref: options.Ref
-      },
-      (err, res) => {
-        if (err) {
-          console.log(err);
-        }
-        return res;
+      if (!branchExists) {
+        return repo.createBranch("master", branchName).then(() => {
+          currentBranch.name = branchName;
+        });
+      } else {
+        currentBranch.name = branchName;
       }
-    )
-    .then(sha => (data.referenceCommitSha = sha.data.object.sha));
+    });
+  };
 
-const createCommit = (options, data) =>
-  github.git
-    .createCommit(
-      {
-        owner: options.owner,
-        repo: options.repo,
-        message: options.commitMessage,
-        tree: data.newTreeSha,
-        parents: [data.referenceCommitSha]
-      },
-      (err, res) => {
-        if (err) {
-          console.log(err);
-        }
-        return res.data.sha;
-      }
-    )
-    .then(sha =>
-      github.git.updateRef(
-        {
-          owner: options.owner,
-          repo: options.repo,
-          ref: options.Ref,
-          sha: sha
-        },
-        (err, res) => {
-          if (err) {
-            console.log(err);
-          }
-          console.log(res);
-        }
-      )
-    );
+  this.pushFiles = function(message, files) {
+    if (!repo) {
+      throw "Repository is not initialized";
+    }
+    if (!currentBranch.hasOwnProperty("name")) {
+      throw "Branch is not set";
+    }
+
+    return getCurrentCommitSHA()
+      .then(getCurrentTreeSHA)
+      .then(() => createFiles(files))
+      .then(createTree)
+      .then(() => createCommit(message))
+      .then(updateHead)
+      .catch(e => {
+        console.error(e);
+      });
+  };
+  this.createpr = options => {
+    return repo.createPullRequest(options).catch(err => console.log(err));
+  };
+
+  function getCurrentCommitSHA() {
+    return repo.getRef("heads/" + currentBranch.name).then(ref => {
+      currentBranch.commitSHA = ref.data.object.sha;
+    });
+  }
+
+  function getCurrentTreeSHA() {
+    return repo.getCommit(currentBranch.commitSHA).then(commit => {
+      currentBranch.treeSHA = commit.data.tree.sha;
+    });
+  }
+
+  function createFiles(filesInfo) {
+    let promises = [];
+    let length = filesInfo.length;
+
+    for (let i = 0; i < length; i++) {
+      promises.push(createFile(filesInfo[i]));
+    }
+
+    return Promise.all(promises);
+  }
+
+  function createFile(fileInfo) {
+    return repo.createBlob(fileInfo.content).then(blob => {
+      filesToCommit.push({
+        sha: blob.data.sha,
+        path: fileInfo.path,
+        mode: "100644",
+        type: "blob"
+      });
+    });
+  }
+
+  function createTree() {
+    return repo.createTree(filesToCommit, currentBranch.treeSHA).then(tree => {
+      newCommit.treeSHA = tree.data.sha;
+    });
+  }
+
+  function createCommit(message) {
+    return repo
+      .commit(currentBranch.commitSHA, newCommit.treeSHA, message)
+      .then(commit => {
+        newCommit.sha = commit.data.sha;
+      });
+  }
+
+  function updateHead() {
+    return repo.updateHead("heads/" + currentBranch.name, newCommit.sha);
+  }
+}
+
+let api = new GithubAPI({
+  username: process.env.username,
+  password: process.env.password
+});
+api.setRepo("daemon1024", "ct-api-priv");
+api
+  .setBranch("hello")
+  .then(() =>
+    api.pushFiles("Testing gitauto", [
+      { content: "You are a Wizard, Harry", path: "harry.txt" }
+    ])
+  )
+  .then(function() {
+    console.log("Files committed!");
+  })
+  .then(() => {
+    api.setRepo("krewzer", "ct-api-priv");
+    api
+      .createpr({
+        title: "Amazing new feature",
+        body: "Please pull these awesome changes in!",
+        head: "daemon1024:hello",
+        base: "master"
+      })
+      .then(() => console.log("made a pr"));
+  });
